@@ -1,1 +1,139 @@
-https://colab.research.google.com/drive/1RuCmRw5jQyVir5Yf92ZBz_8oGRLzPaUi?usp=sharing
+import torch
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+import librosa
+import gradio as gr
+import random
+from gtts import gTTS
+from pydub import AudioSegment
+
+# Load the pretrained Wav2Vec 2.0 model and processor
+processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-large-960h")
+model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-large-960h")
+
+def load_audio(file_path, sample_rate=16000):
+    # Load audio file and resample to desired sample rate
+    audio, sr = librosa.load(file_path, sr=sample_rate)
+    return audio
+
+def text_to_speech(text, filename="output.mp3"):
+    # Convert text to speech, save as MP3
+    tts = gTTS(text=text, lang='en')
+    tts.save(filename)
+    return filename
+
+def compare_texts(expected_text, predicted_text):
+    # Compare expected text and predicted text word by word for matching and non-matching
+    expected_words = expected_text.lower().split()
+    predicted_words = predicted_text.lower().split()
+
+    matching_words = []
+    non_matching_words = []
+
+    for i in range(min(len(expected_words), len(predicted_words))):
+        if expected_words[i] == predicted_words[i]:
+            matching_words.append(expected_words[i])
+        else:
+            non_matching_words.append((expected_words[i], predicted_words[i]))
+
+    # Include extra words if lengths differ
+    if len(expected_words) > len(predicted_words):
+        for i in range(len(predicted_words), len(expected_words)):
+            non_matching_words.append((expected_words[i], None))
+    elif len(predicted_words) > len(expected_words):
+        for i in range(len(expected_words), len(predicted_words)):
+            non_matching_words.append((None, predicted_words[i]))
+
+    return matching_words, non_matching_words
+
+def detect_pronunciation_mistakes(audio_file, expected_text):
+    # Convert audio to mp3 for record (optional)
+    audio = AudioSegment.from_file(audio_file)
+    audio.export('output_recorded.mp3', format='mp3')
+
+    # Load audio tensor for ASR model
+    audio_tensor = torch.tensor(load_audio(audio_file), dtype=torch.float32)
+    input_values = processor(audio_tensor, sampling_rate=16000, return_tensors="pt").input_values
+
+    with torch.no_grad():
+        logits = model(input_values).logits
+
+    predicted_ids = torch.argmax(logits, dim=-1)
+    predicted_text = processor.batch_decode(predicted_ids)[0].lower()
+
+    result_text = f"Expected Text: {expected_text}\nPredicted Text: {predicted_text}\n"
+
+    expected_words = expected_text.lower().split()
+    predicted_words = predicted_text.split()
+
+    errors = []
+    for i, word in enumerate(predicted_words):
+        if i < len(expected_words) and word != expected_words[i]:
+            errors.append((expected_words[i], word))
+
+    if errors:
+        result_text += "Pronunciation Mistakes Detected:\n"
+        for expected_word, predicted_word in errors:
+            result_text += f"  - Expected: {expected_word}, Predicted: {predicted_word}\n"
+    else:
+        result_text += "✅ No Pronunciation Mistakes Detected"
+
+    # Save result to text file
+    with open('output.txt', 'wt') as f:
+        f.write(result_text)
+
+    # Create speech audio from predicted text for review
+    text_to_speech(predicted_text, 'transcription_output.mp3')
+
+    matches, mismatches = compare_texts(expected_text, predicted_text)
+
+    # Format matching and mismatching words line
+    match_str = ", ".join(matches) if matches else "None"
+    mismatch_str = ", ".join(
+        f"Expected: '{e}' Predicted: '{p}'" for e, p in mismatches
+    ) if mismatches else "None"
+
+    analysis_text = f"Matching Words: {match_str}\nNon-matching Words: {mismatch_str}"
+
+    return result_text, analysis_text
+
+sentences = [
+    "The teacher explained the lesson clearly to the class.",
+    "I woke up early to watch the sunrise.",
+    "She bought a new dress for the party.",
+    "They are building a treehouse in the backyard.",
+    "My dad fixed the broken chair last night.",
+    "We enjoyed a peaceful walk along the beach.",
+    "He packed his lunch before going to work.",
+    "She listens to music while doing her homework.",
+    "I saw a shooting star in the night sky.",
+    "The kids laughed as they played in the rain.",
+    "We visited the zoo and saw a lion up close.",
+    "She made a card for her friend’s birthday.",
+    "The cat jumped onto the windowsill and fell asleep.",
+    "He forgot to charge his phone overnight.",
+    "We took a lot of pictures during the trip.",
+]
+
+def get_random_sentence():
+    return random.choice(sentences)
+
+# Gradio Interface
+def interface_fn(audio_file, expected_text):
+    return detect_pronunciation_mistakes(audio_file, expected_text)
+
+demo = gr.Interface(
+    fn=interface_fn,
+    inputs=[
+        gr.Audio(type="filepath", source="upload", label="Upload or record your speech (WAV format)"),
+        gr.Textbox(label="Expected Text", value=get_random_sentence()),
+    ],
+    outputs=[
+        gr.Textbox(label="Pronunciation Analysis"),
+        gr.Textbox(label="Word Matching Analysis"),
+    ],
+    title="Automatic Pronunciation Mistake Detector",
+    description="Upload or record an audio saying the expected sentence, and the app checks for pronunciation mistakes by comparing speech to expected text.",
+)
+
+if __name__ == "__main__":
+    demo.launch()
